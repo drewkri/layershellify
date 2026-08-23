@@ -1,0 +1,9 @@
+[package]
+name = "layershellify"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smithay = "0.7.0"
+smithay-client-toolkit = "0.21.1"
+tracing = { version = "0.1.44", features = ["max_level_trace", "release_max_level_debug"] }
