@@ -22,37 +22,44 @@ use smithay::{
     },
 };
 
-mod handlers;
+use crate::State;
 
-pub struct BoxComp {
+mod handlers;
+mod input;
+
+pub struct ServerState {
     display_handle: DisplayHandle,
     shm_state: ShmState,
     compositor_state: CompositorState,
     space: Space<Window>,
     popups: PopupManager,
     shell_state: XdgShellState,
+    seat_state: SeatState<State>,
 }
 
-impl BoxComp {
-    pub fn new(event_loop: &mut EventLoop<Self>) -> Self {
-        let display: Display<BoxComp> = Display::new().expect("Cannot create new display");
+impl ServerState {
+    pub fn new(display: Display<State>, event_loop: &mut EventLoop<State>) -> Self {
         let display_handle = display.handle();
         let socket_name = Self::init_wayland_listener(display, event_loop);
         println!("{:?}", socket_name);
         Self {
-            shm_state: ShmState::new::<Self>(
+            shm_state: ShmState::new::<State>(
                 &display_handle,
                 [wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
             ),
-            compositor_state: CompositorState::new(&display_handle),
+            compositor_state: CompositorState::new::<State>(&display_handle),
             space: Space::default(),
             popups: PopupManager::default(),
-            shell_state: XdgShellState::new::<Self>(&display_handle),
+            shell_state: XdgShellState::new::<State>(&display_handle),
+            seat_state: SeatState::default(),
             display_handle,
         }
     }
 
-    fn init_wayland_listener(display: Display<Self>, event_loop: &mut EventLoop<Self>) -> OsString {
+    fn init_wayland_listener(
+        display: Display<State>,
+        event_loop: &mut EventLoop<State>,
+    ) -> OsString {
         // Creates a new listening socket, automatically choosing the next available `wayland` socket name.
         let listening_socket = ListeningSocketSource::new_auto().unwrap();
 
@@ -68,8 +75,9 @@ impl BoxComp {
                 //
                 // You may also associate some data with the client when inserting the client.
                 state
+                    .server
                     .display_handle
-                    .insert_client(client_stream, Arc::new(ClientState::default()))
+                    .insert_client(client_stream, Arc::new(ServerClientState::default()))
                     .unwrap();
             })
             .expect("Failed to init the wayland event source.");
@@ -94,12 +102,13 @@ impl BoxComp {
 
 /// Data associated with a wayland client that connects to the compositor.
 /// One instance of this type per client.
+/// This name is confusing but I need it to not conflict with the CLIENT end of this crate.
 #[derive(Default)]
-pub struct ClientState {
+pub struct ServerClientState {
     pub compositor_state: CompositorClientState,
 }
 
-impl ClientData for ClientState {
+impl ClientData for ServerClientState {
     fn initialized(&self, _client_id: ClientId) {}
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
