@@ -2,20 +2,20 @@
 use std::{ffi::OsString, sync::Arc};
 
 use smithay::{
+    backend::renderer::damage::OutputDamageTracker,
     desktop::{PopupManager, Space, Window},
-    input::{Seat, SeatState},
+    input::SeatState,
+    output,
     reexports::{
-        calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
+        calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
         wayland_server::{
             Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::wl_shm,
+            protocol::wl_shm::Format,
         },
     },
     wayland::{
         compositor::{CompositorClientState, CompositorState},
-        output::OutputManagerState,
-        selection::data_device::DataDeviceState,
         shell::xdg::XdgShellState,
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -29,12 +29,18 @@ mod input;
 
 pub struct ServerState {
     display_handle: DisplayHandle,
-    shm_state: ShmState,
     compositor_state: CompositorState,
+    shm_state: ShmState,
+    // TODO: Multiple spaces for multiple client windows - we'll probably need a separate
+    // "space" to correspond to a window opened in the main compositor
     space: Space<Window>,
     popups: PopupManager,
     shell_state: XdgShellState,
     seat_state: SeatState<State>,
+    // TODO: REMOVE THIS AND REPLACE SPACE WITH A LIST OF SPACES!
+    // WILL NOT WORK WELL WITH MULTIPLE OUTPUTS
+    pub output_damage_tracker: Option<OutputDamageTracker>,
+    pub output: Option<output::Output>,
 }
 
 impl ServerState {
@@ -43,16 +49,18 @@ impl ServerState {
         let socket_name = Self::init_wayland_listener(display, event_loop);
         println!("{:?}", socket_name);
         Self {
+            compositor_state: CompositorState::new::<State>(&display_handle),
             shm_state: ShmState::new::<State>(
                 &display_handle,
-                [wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
+                [Format::Argb8888, Format::Xrgb8888],
             ),
-            compositor_state: CompositorState::new::<State>(&display_handle),
             space: Space::default(),
             popups: PopupManager::default(),
             shell_state: XdgShellState::new::<State>(&display_handle),
             seat_state: SeatState::default(),
             display_handle,
+            output: None,
+            output_damage_tracker: None,
         }
     }
 
@@ -97,6 +105,22 @@ impl ServerState {
             .unwrap();
 
         socket_name
+    }
+
+    pub fn display_handle(&self) -> &DisplayHandle {
+        &self.display_handle
+    }
+
+    pub fn space(&self) -> &Space<Window> {
+        &self.space
+    }
+
+    pub fn space_mut(&mut self) -> &mut Space<Window> {
+        &mut self.space
+    }
+
+    pub fn refresh_space(&mut self) {
+        self.space.refresh();
     }
 }
 

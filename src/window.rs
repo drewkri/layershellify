@@ -1,6 +1,11 @@
 use std::num::NonZeroU32;
 
-use smithay::reexports::x11rb::protocol::res::Client;
+use smithay::{
+    backend::renderer::element::RenderElement,
+    desktop::{WindowSurfaceType, space::space_render_elements},
+    reexports::wayland_server::Resource,
+    wayland::seat::WaylandFocus,
+};
 // most boilerplate copied from smithay examples
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -25,6 +30,7 @@ use smithay_client_toolkit::{
     },
 };
 
+pub mod bridge;
 use crate::State;
 
 pub struct ClientState {
@@ -51,7 +57,7 @@ impl CompositorHandler for State {
         _surface: &wl_surface::WlSurface,
         _new_factor: i32,
     ) {
-        // Not needed for this example.
+        // Not needed
     }
 
     fn transform_changed(
@@ -61,7 +67,7 @@ impl CompositorHandler for State {
         _surface: &wl_surface::WlSurface,
         _new_transform: wl_output::Transform,
     ) {
-        // Not needed for this example.
+        // Not needed
     }
 
     fn frame(
@@ -71,7 +77,7 @@ impl CompositorHandler for State {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        self.client.draw(qh);
+        self.draw(qh);
     }
 
     fn surface_enter(
@@ -81,7 +87,7 @@ impl CompositorHandler for State {
         _surface: &wl_surface::WlSurface,
         _output: &wl_output::WlOutput,
     ) {
-        // Not needed for this example.
+        // Not needed
     }
 
     fn surface_leave(
@@ -91,7 +97,7 @@ impl CompositorHandler for State {
         _surface: &wl_surface::WlSurface,
         _output: &wl_output::WlOutput,
     ) {
-        // Not needed for this example.
+        // Not needed
     }
 }
 
@@ -131,13 +137,15 @@ impl ShmHandler for State {
     }
 }
 
-impl ClientState {
+impl State {
     pub fn draw(&mut self, qh: &QueueHandle<State>) {
-        let width = self.width;
-        let height = self.height;
-        let stride = self.width as i32 * 4;
+        println!("Redraw");
+        let width = self.client.width;
+        let height = self.client.height;
+        let stride = self.client.width as i32 * 4;
 
         let (buffer, canvas) = self
+            .client
             .pool
             .create_buffer(
                 width as i32,
@@ -147,38 +155,51 @@ impl ClientState {
             )
             .expect("create buffer");
 
-        // Draw to the window:
-        {
-            canvas
-                .chunks_exact_mut(4)
-                .enumerate()
-                .for_each(|(index, chunk)| {
-                    let a = 0xFF;
-                    let r = 0;
-                    let g = 0;
-                    let b = 0;
-                    let color: u32 = (a << 24) + (r << 16) + (g << 8) + b;
-
-                    let array: &mut [u8; 4] = chunk.try_into().unwrap();
-                    *array = color.to_le_bytes();
-                });
+        let elements = space_render_elements(
+            &mut self.renderer,
+            [self.server.space()],
+            self.server.output.as_ref().unwrap(),
+            1.0,
+        )
+        .unwrap();
+        // let x = self.server.space()
+        for el in elements {
+            let storage = el.underlying_storage(&mut self.renderer).unwrap();
         }
+        // {
+        //     canvas
+        //         .chunks_exact_mut(4)
+        //         .enumerate()
+        //         .for_each(|(index, chunk)| {
+        //             let a = 0xFF;
+        //             let r = 0;
+        //             let g = 0;
+        //             let b = 0;
+        //             let color: u32 = (a << 24) + (r << 16) + (g << 8) + b;
+
+        //             let array: &mut [u8; 4] = chunk.try_into().unwrap();
+        //             *array = color.to_le_bytes();
+        //         });
+        // }
 
         // Damage the entire window
-        self.layer
+        self.client
+            .layer
             .wl_surface()
             .damage_buffer(0, 0, width as i32, height as i32);
 
+        // TODO: Stop constantly requesting frames (if possible)
         // Request our next frame
-        self.layer
-            .wl_surface()
-            .frame(qh, FrameCallbackData(self.layer.wl_surface().clone()));
+        self.client.layer.wl_surface().frame(
+            qh,
+            FrameCallbackData(self.client.layer.wl_surface().clone()),
+        );
 
         // Attach and commit to present.
         buffer
-            .attach_to(self.layer.wl_surface())
+            .attach_to(self.client.layer.wl_surface())
             .expect("buffer attach");
-        self.layer.commit();
+        self.client.layer.commit();
 
         // TODO save and reuse buffer when the window size is unchanged.  This is especially
         // useful if you do damage tracking, since you don't need to redraw the undamaged parts
@@ -196,8 +217,6 @@ impl ProvidesRegistryState for State {
 
 delegate_registry!(State);
 
-// smithay_client_toolkit::delegate_dispatch2!(State);
-
 impl LayerShellHandler for State {
     fn closed(
         &mut self,
@@ -205,7 +224,7 @@ impl LayerShellHandler for State {
         qh: &QueueHandle<Self>,
         layer: &smithay_client_toolkit::shell::wlr_layer::LayerSurface,
     ) {
-        // unhandled
+        // Not needed
     }
 
     fn configure(
@@ -222,7 +241,7 @@ impl LayerShellHandler for State {
         // Initiate the first draw.
         if self.client.first_configure {
             self.client.first_configure = false;
-            self.client.draw(qh);
+            self.draw(qh);
         }
     }
 }

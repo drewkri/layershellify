@@ -2,7 +2,10 @@ use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_output, delegate_shm, delegate_xdg_shell,
     desktop::{PopupKind, Window, find_popup_root_surface, get_popup_toplevel_coords},
-    reexports::wayland_server::{Client, protocol::wl_surface::WlSurface},
+    reexports::wayland_server::{
+        Client, Dispatch,
+        protocol::{wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface},
+    },
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -11,7 +14,7 @@ use smithay::{
         },
         output::OutputHandler,
         shell::xdg::{PopupSurface, XdgShellHandler, XdgToplevelSurfaceData},
-        shm::ShmHandler,
+        shm::{ShmHandler, ShmPoolUserData},
     },
 };
 use smithay_client_toolkit::delegate_dispatch2;
@@ -91,18 +94,18 @@ impl CompositorHandler for State {
     }
 }
 
-impl ShmHandler for State {
-    fn shm_state(&self) -> &smithay::wayland::shm::ShmState {
-        &self.server.shm_state
-    }
-}
-
 impl BufferHandler for State {
     fn buffer_destroyed(
         &mut self,
         buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
     ) {
         // nothing necessary here
+    }
+}
+
+impl ShmHandler for State {
+    fn shm_state(&self) -> &smithay::wayland::shm::ShmState {
+        &self.server.shm_state
     }
 }
 
@@ -178,6 +181,7 @@ impl ServerState {
 }
 
 delegate_dispatch2!(State);
-delegate_shm!(State);
+delegate_output!(State);
 delegate_xdg_shell!(State);
 delegate_compositor!(State);
+delegate_shm!(State);
