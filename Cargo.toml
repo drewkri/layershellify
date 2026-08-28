@@ -1,9 +1,0 @@
-[package]
-name = "layershellify"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-smithay = "0.7.0"
-smithay-client-toolkit = { version = "0.21.1", feautres = ["wayland_frontend", "desktop", "renderer_pixman"] }
-tracing = { version = "0.1.44", features = ["max_level_trace", "release_max_level_debug"] }
