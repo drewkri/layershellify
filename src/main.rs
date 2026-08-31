@@ -41,20 +41,6 @@ struct State {
     app_socket: UnixStream,
 }
 
-// Storing here for now.
-// This error happens because the proxy's socket receive buffer is overflowing before your program can process or forward the incoming data.
-// When an application creates a shared memory pool (wl_shm::create_pool), it passes a file descriptor (fd) over the Unix socket via auxiliary control data (SCM_RIGHTS). If the proxy reads the main socket stream without properly handling or extracting the pending file descriptors—or if processing the buffer stalls while waiting to handle fd passing—the incoming kernel socket buffer quickly fills up, triggering ENOBUFS (No buffer space available) on subsequent recvmsg() calls.
-// Here are the most common causes in Rust Wayland proxy implementations:
-//     Unconsumed Control Data (ancillary buffer): If recvmsg receives file descriptors in the SCM_RIGHTS control message but your code fails to clear or correctly
-// size the control buffer (cmsg), the kernel stops delivering data or buffers get clogged. Ensure your buffer supplied to nix::sys::socket::recvmsg has enough space
-// for control messages (CmsgSpace).
-//     FD Leak / Socket Backpressure: If wl_shm::create_pool is called repeatedly in a tight loop by the client, the client is sending a rapid burst of data.
-// If your proxy blocks while trying to forward the file descriptor or message to the main compositor socket, the client-facing socket buffer overflows.
-//     Non-blocking Socket Mismatch: If the socket is set to non-blocking mode and you aren't draining the socket entirely until EWOULDBLOCK/EAGAIN, or if the
-// compositor side isn't keeping up, socket buffers back up until ENOBUFS is thrown.
-//     Socket Buffer Size Limits: The OS default buffer size for the socket might be too small for heavy wl_shm burst traffic. You can inspect or increase
-// the socket receive buffer using nix::sys::socket::setsockopt with SO_RCVBUF.
-
 fn main() {
     env_logger::init();
 
@@ -105,9 +91,6 @@ fn main() {
         .accept()
         .expect("Can't connect to client application.");
 
-    // embedded_client.set_nonblocking(false).unwrap();
-    // client_socket.set_nonblocking(false).unwrap();
-
     let mut state = State {
         compositor_socket: client_socket,
         app_socket: embedded_client,
@@ -118,7 +101,7 @@ fn main() {
     let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
     // should be large enough to hold any message easily
     let mut client_read_msg_buffer = [0; 2048];
-    // 4 FDs should be enough space. hopefully.
+    // Usually only ever 1 FD but just to be safe I've allocated space for 4.
     let mut client_ancillary_buffer = cmsg_space!([RawFd; 4]);
     let mut server_read_msg_buffer = [0; 2048];
     let mut server_ancillary_buffer = cmsg_space!([RawFd; 4]);
