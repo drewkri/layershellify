@@ -1,51 +1,67 @@
 use std::{
-    env,
-    fmt::write,
-    fs,
-    io::{IoSlice, IoSliceMut, Read, Write},
+    env, fs,
+    io::{IoSlice, IoSliceMut},
     os::{
-        fd::{AsFd, AsRawFd, RawFd},
+        fd::{AsRawFd, RawFd},
         unix::net::{UnixListener, UnixStream},
     },
-    panic,
     path::Path,
-    ptr::read,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use bytemuck::bytes_of;
 use calloop::{
     EventLoop, Interest,
     generic::{FdWrapper, Generic},
-    io::Writable,
 };
-use log::{LevelFilter, debug, error, trace, warn};
-use log4rs::{append::file::FileAppender, encode::pattern::PatternEncoder};
+use log::{debug, warn};
 use nix::{
     cmsg_space,
-    libc::{MSG_CTRUNC, SO_RCVBUF, close},
-    sys::socket::{
-        ControlMessageOwned, GetSockOpt, MsgFlags, SetSockOpt, getsockopt, recv, recvmsg, sendmsg,
-        setsockopt,
-        sockopt::{self, RcvBuf},
-    },
+    libc::close,
+    sys::socket::{ControlMessageOwned, MsgFlags, recvmsg, sendmsg},
 };
 
-use crate::{decode::decode_messages, util::to_borrowd_cmsgs};
+use crate::{
+    decode::{scan_events, scan_requests},
+    util::to_borrowd_cmsgs,
+};
 
 mod decode;
 mod util;
 
+/// State machine enum contained inside State. Used to track what
+/// types of messages we're looking for and what needs to be done next.
+enum ProxyPhase {
+    /// Waiting for the client to bind xdg_wm_base, and for us to bind to zwlr_layer_shell_v1.
+    /// Will listen for the client's request(s) to get the registry and find the name of
+    /// the layer shell global, then intercept the client's attempt to bind xdg_wm_base and
+    /// instead bind zwlr_layer_shell_v1.
+    Binding {
+        registry_id: Option<u32>,
+        advertised_layer_shell_name: Option<u32>,
+        layer_shell_id: Option<u32>,
+    },
+    /// Layer shell has been bound, now the proxy needs to handle any requests/events
+    /// involving xdg_wm_base/layer shell
+    Listening {
+        layer_shell_id: u32,
+        layer_surface_id: Option<u32>,
+    },
+}
+
+/// Shared state of the proxy
 struct State {
     compositor_socket: UnixStream,
     app_socket: UnixStream,
+    phase: ProxyPhase,
 }
 
 fn main() {
     env_logger::init();
 
-    // let logfile = FileAppender::builder()
-    //     .encoder(Box::new(PatternEncoder::new("{l} - {m}\n")))
+    // let logfile = log4rs::append::file::FileAppender::builder()
+    //     .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
+    //         "{l} - {m}\n",
+    //     )))
     //     .build("log.txt")
     //     .unwrap();
 
@@ -54,7 +70,7 @@ fn main() {
     //     .build(
     //         log4rs::config::Root::builder()
     //             .appender("logfile")
-    //             .build(LevelFilter::Debug),
+    //             .build(log::LevelFilter::Debug),
     //     )
     //     .unwrap();
     // log4rs::init_config(config).unwrap();
@@ -94,6 +110,11 @@ fn main() {
     let mut state = State {
         compositor_socket: client_socket,
         app_socket: embedded_client,
+        phase: ProxyPhase::Binding {
+            registry_id: None,
+            advertised_layer_shell_name: None,
+            layer_shell_id: None,
+        },
     };
     let c_fd = state.compositor_socket.as_raw_fd();
     let a_fd = state.app_socket.as_raw_fd();
@@ -125,17 +146,15 @@ fn main() {
                     MsgFlags::MSG_CMSG_CLOEXEC,
                 ) {
                     if recv_msg.bytes > 0 {
+                        debug!("Reading requests.");
                         let bytes = recv_msg.iovs().next().unwrap();
-                        let decoded = decode_messages(&bytes[0..recv_msg.bytes]);
-                        for msg in decoded {
-                            debug!("[APP] {}", msg);
-                        }
-                        debug!("[APP] Messages ended.");
+                        let output_bytes = scan_requests(&bytes[0..recv_msg.bytes], data);
+                        debug!("Requests ended.");
                         let owned_msgs = recv_msg.cmsgs().unwrap().collect();
                         let msgs = to_borrowd_cmsgs(&owned_msgs);
                         sendmsg::<()>(
                             data.compositor_socket.as_raw_fd(),
-                            &[IoSlice::new(&bytes[0..recv_msg.bytes])],
+                            &[IoSlice::new(&output_bytes)],
                             &msgs,
                             recv_msg.flags,
                             None,
@@ -151,7 +170,7 @@ fn main() {
                         }
                     }
                 } else {
-                    warn!("Error receiving message.")
+                    warn!("Read failed")
                 }
                 Ok(calloop::PostAction::Continue)
             },
@@ -175,13 +194,11 @@ fn main() {
                     Some(&mut server_ancillary_buffer),
                     MsgFlags::MSG_CMSG_CLOEXEC,
                 ) {
-                    let bytes = &recv_msg.iovs().next().unwrap();
                     if recv_msg.bytes > 0 {
-                        let decoded = decode_messages(&bytes[0..recv_msg.bytes]);
-                        for msg in decoded {
-                            debug!("[SERVER] {}", msg);
-                        }
-                        debug!("[SERVER] Messages ended.");
+                        debug!("Reading events.");
+                        let bytes = &recv_msg.iovs().next().unwrap();
+                        let output_bytes = scan_events(&bytes[0..recv_msg.bytes], data);
+                        debug!("Events ended.");
                         let owned_msgs = recv_msg.cmsgs().unwrap().collect();
                         let msgs = to_borrowd_cmsgs(&owned_msgs);
                         sendmsg::<()>(

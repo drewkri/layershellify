@@ -15,3 +15,11 @@ pub fn to_borrowd_cmsgs<'a>(vec: &'a Vec<ControlMessageOwned>) -> Vec<ControlMes
 
     out
 }
+
+pub fn message_header(object_id: u32, opcode: u16, size: u16) -> Vec<u8> {
+    let mut vec = Vec::with_capacity(size as usize);
+    vec.extend_from_slice(&object_id.to_le_bytes());
+    vec.extend_from_slice(&opcode.to_le_bytes());
+    vec.extend_from_slice(&size.to_le_bytes());
+    vec
+}
