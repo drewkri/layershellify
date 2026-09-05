@@ -3,28 +3,14 @@ use std::{fmt::Display, u32};
 use bytemuck::from_bytes;
 use log::{debug, warn};
 
-use crate::{ProxyPhase, State, util::message_header};
-
-const LAYERSHELLIFY_STRING: [u8; 44] = [
-    39, 0, 0, 0, // size (16)
-    105, 111, 46, 103, 105, 116, 104, 117, 98, 46, 68, 114, 101, 119, 67, 111, 100, 101, 115, 66,
-    97, 100, 108, 121, 46, 76, 97, 121, 101, 114, 115, 104, 101, 108, 108, 105, 102, 121, 0, 0,
-];
-const LAYER_SHELL_STRING_LEN: u32 = 20;
-
-/// Template used to bind to zwlr_layer_shell_v1. Prefix
-/// with the u32 name advertised by the compositor.
-const LAYER_SHELL_BIND_TEMPLATE: [u8; 28] = [
-    /* name must go here (u32) */
-    20, 0, 0, 0, // String size
-    122, 119, 108, 114, 95, 108, 97, 121, 101, 114, 95, // String + null terminator
-    115, 104, 101, 108, 108, 95, 118, 49, 0, // String + null terminator (continued)
-    5, 0, 0, 0, // Version
-       /* New ID goes here */
-];
-
-/// "xdg_wm_base" in bytes, with a null terminator
-const XDG_WM_BASE_STRING: [u8; 12] = [120, 100, 103, 95, 119, 109, 95, 98, 97, 115, 101, 0];
+use crate::{
+    State,
+    util::{
+        LAYER_SHELL_BIND_TEMPLATE, LAYER_SHELL_STRING_LEN, LAYERSHELLIFY_STRING,
+        XDG_WM_BASE_STRING, ZXDG_DECORATION_MANAGER_STRING, bind_layer_shell,
+        create_useless_object, message_header,
+    },
+};
 
 /// Struct representing a message in Wayland and containing all its information.
 pub struct WaylandMessage {
@@ -53,160 +39,209 @@ pub enum MessageOperation {
 
 pub fn scan_requests(bytes: &[u8], state: &mut State) -> Vec<u8> {
     scan_messages(bytes, state, |bytes, state, obj_id, opcode| {
-        match state.phase {
-            ProxyPhase::Binding {
-                registry_id,
-                advertised_layer_shell_name,
-                layer_shell_id,
-            } => {
-                // wl_registry::bind
-                if let Some(id) = registry_id
-                    && obj_id == id
-                    && opcode == 0
-                {
-                    // Ignore name, we're interested in the rest of it
-                    // technically I'm not clear on why you can't just send the name and
-                    // the new id, but every client i've seen thus far sends the new id with
-                    // defined interface so I will assume they all do that.
-                    let str_size: u32 = *from_bytes(&bytes[12..16]);
-                    // size of xdg_wm_base + null terminator
-                    if str_size == XDG_WM_BASE_STRING.len() as u32 {
-                        // Verify the string is actually that
-                        if bytes[16..28] == XDG_WM_BASE_STRING {
-                            // Get the new id
-                            // The next 4 bytes are version, then id
-                            // If the client is binding to globals, we should've already sent our layer shell bind request
-                            // since the server must've advertised globals.
-                            let xdg_wm_id: u32 = *from_bytes(&bytes[32..36]);
-                            let mut message = message_header(
-                                id,
-                                0,
-                                8 + 4 + LAYER_SHELL_BIND_TEMPLATE.len() as u16 + 4,
-                            );
-                            let name = advertised_layer_shell_name
-                                .expect("Server did not advertise layer shell global.");
-                            message.extend_from_slice(&name.to_le_bytes());
-                            message.extend_from_slice(&LAYER_SHELL_BIND_TEMPLATE);
-                            message.extend_from_slice(&xdg_wm_id.to_le_bytes());
-                            debug!("[STATE CHANGE] Bound layer shell, now listening.");
-                            state.phase = ProxyPhase::Listening {
-                                layer_shell_id: xdg_wm_id,
-                                layer_surface_id: None,
-                            };
-                            // Replace with layer shell bind
-                            return MessageOperation::Replace(message);
-                        }
-                    }
-                }
-                // wl_display::get_registry(new_id)
-                // We still need to handle this since the client may try binding from
-                // a different registry
-                // However I have yet to see a client bind xdg_wm_base twice before
-                // creating a window so I think we're fine there.
-                // I also have yet to see a client return to a previously created registry and then bind
-                // xdg_wm_base and cannot imagine that happening so I have elected not to cover that case.
-                else if obj_id == 1 && opcode == 1 {
-                    let new_reg_id = *from_bytes(&bytes[8..12]);
-                    state.phase = ProxyPhase::Binding {
-                        registry_id: Some(new_reg_id),
-                        advertised_layer_shell_name,
-                        layer_shell_id,
-                    };
-                }
+        if state.client_blacklist_ids.contains(&obj_id) {
+            MessageOperation::Drop
+        }
+        // wl_registry::bind
+        else if let Some(id) = state.registry_id
+            && obj_id == id
+            && opcode == 0
+        {
+            // Ignore name, we're interested in the rest of it
+            // technically I'm not clear on why you can't just send the name and
+            // the new id, but every client i've seen thus far sends the new id with
+            // defined interface so I will assume they all do that.
+            let str_size: u32 = *from_bytes(&bytes[12..16]);
+            // size of xdg_wm_base + null terminator
+            if str_size == XDG_WM_BASE_STRING.len() as u32
+                && state.layer_shell_id.is_none()
+                && bytes[16..28] == XDG_WM_BASE_STRING
+            {
+                // Get the new id
+                // The next 4 bytes are version, then id
+                // If the client is binding to globals, we should've already sent our layer shell bind request
+                // since the server must've advertised globals.
+                let xdg_wm_id: u32 = *from_bytes(&bytes[32..36]);
+                // The client will only start binding after the server advertises globals.
+                let name = state
+                    .advertised_layer_shell_name
+                    .expect("Server did not advertise layer shell global.");
+                let message = bind_layer_shell(id, name, xdg_wm_id);
+                debug!("Bound layer shell.");
+                state.layer_shell_id = Some(xdg_wm_id);
+
+                // Replace with layer shell bind
+                MessageOperation::Replace(message)
+            } else if str_size == ZXDG_DECORATION_MANAGER_STRING.len() as u32
+                && bytes[16..16 + ZXDG_DECORATION_MANAGER_STRING.len()]
+                    == ZXDG_DECORATION_MANAGER_STRING
+            {
+                let id: u32 = *from_bytes(
+                    // Size of arguments added for clarity
+                    &bytes[16 + ZXDG_DECORATION_MANAGER_STRING.len() + 1 + 4
+                        ..16 + ZXDG_DECORATION_MANAGER_STRING.len() + 1 + 8],
+                );
+                debug!("Found zxdg_decoration_manager_v1");
+                state.xdg_decoration_id = Some(id);
+                MessageOperation::Keep
+            } else {
                 MessageOperation::Keep
             }
-            ProxyPhase::Listening {
-                layer_shell_id,
-                layer_surface_id,
-            } => {
-                // xdg_wm_base::get_xdg_surface
-                if obj_id == layer_shell_id && opcode == 2 {
-                    let new_id: u32 = *from_bytes(&bytes[8..12]);
-                    let surface_id: u32 = *from_bytes(&bytes[12..16]);
-
-                    // Create layer shell
-                    let mut message = message_header(layer_shell_id, 0, 68);
-                    message.extend_from_slice(&new_id.to_le_bytes()); // new id
-                    message.extend_from_slice(&surface_id.to_le_bytes()); // wl_surface
-                    message.extend_from_slice(&0u32.to_le_bytes()); // output (null)
-                    message.extend_from_slice(&3u32.to_le_bytes()); // layer (overlay)
-                    // message.extend_from_slice(&0u32.to_le_bytes()); // string
-                    message.extend_from_slice(&LAYERSHELLIFY_STRING);
-                    debug!("Message length was: {}", message.len());
-
-                    // Set anchors
-                    message.extend_from_slice(&message_header(new_id, 1, 12));
-                    message.extend_from_slice(&4u32.to_le_bytes());
-
-                    // Set size
-                    message.extend_from_slice(&message_header(new_id, 0, 16));
-                    message.extend_from_slice(&128u32.to_le_bytes());
-                    message.extend_from_slice(&128u32.to_le_bytes());
-
-                    // Set margin
-                    message.extend_from_slice(&message_header(new_id, 3, 24));
-                    message.extend_from_slice(&8u32.to_le_bytes());
-                    message.extend_from_slice(&8u32.to_le_bytes());
-                    message.extend_from_slice(&8u32.to_le_bytes());
-                    message.extend_from_slice(&8u32.to_le_bytes());
-
-                    // Set keyboard interactivity
-                    message.extend_from_slice(&message_header(new_id, 4, 12));
-                    message.extend_from_slice(&2u32.to_le_bytes());
-
-                    // Update state
-                    debug!("Sending layer surface creation messages.");
-                    state.phase = ProxyPhase::Listening {
-                        layer_shell_id,
-                        layer_surface_id: Some(new_id),
-                    };
-
-                    MessageOperation::Replace(message)
-                    // MessageOperation::Keep
-                } else {
-                    MessageOperation::Keep
+        }
+        // wl_display::get_registry(new_id)
+        else if obj_id == 1 && opcode == 1 {
+            let new_reg_id = *from_bytes(&bytes[8..12]);
+            state.registry_id = Some(new_reg_id);
+            MessageOperation::Keep
+        } else if let Some(id) = state.layer_surface_id
+            && obj_id == id
+        {
+            match opcode {
+                // destroy
+                0 => {
+                    let mut vec: Vec<u8> = bytes[0..8].iter().cloned().collect();
+                    // swap to layer shell destroy opcode
+                    vec[4] = 1;
+                    MessageOperation::Replace(vec)
                 }
+                // get_toplevel
+                1 => {
+                    // We need to replace the toplevel with a BS object
+                    // so that there isn't a gap between client objects.
+                    let new_id: u32 = *from_bytes(&bytes[8..12]);
+                    state.xdg_toplevel_id = Some(new_id);
+                    state.client_blacklist_ids.push(new_id); // we only need to send events to this, not the other way around
+                    MessageOperation::Replace(create_useless_object(new_id, state))
+                }
+                // get_popup
+                2 => {}
+                _ => MessageOperation::Drop, // Protocol error
             }
+        } else if let Some(id) = state.xdg_decoration_id
+            && obj_id == id
+        {
+            match opcode {
+                // destroy
+                0 => {
+                    let mut msg: Vec<u8> = bytes[0..8].iter().cloned().collect();
+                    msg[4] = 1;
+                    MessageOperation::Replace(msg)
+                }
+                // get_toplevel_decoration
+                1 => {
+                    let new_id = *from_bytes(&bytes[8..12]);
+                    // state.xdg_toplevel_decoration_id = Some(new_id);
+                    debug!("Blacklisting id {}", new_id);
+                    state.client_blacklist_ids.push(new_id);
+                    MessageOperation::Replace(create_useless_object(new_id, state))
+                }
+                _ => MessageOperation::Drop, // Protocol error
+            }
+        } else if let Some(layer_shell_id) = state.layer_shell_id
+            && obj_id == layer_shell_id
+            && opcode == 2
+            && state.layer_surface_id.is_none()
+        // TODO: what to do with multiple windows?
+        {
+            let new_id: u32 = *from_bytes(&bytes[8..12]);
+            let surface_id: u32 = *from_bytes(&bytes[12..16]);
+
+            // Create layer shell
+            let mut message = message_header(layer_shell_id, 0, 68);
+            message.extend_from_slice(&new_id.to_le_bytes()); // new id
+            message.extend_from_slice(&surface_id.to_le_bytes()); // wl_surface
+            message.extend_from_slice(&0u32.to_le_bytes()); // output (null)
+            message.extend_from_slice(&3u32.to_le_bytes()); // layer (overlay)
+            // message.extend_from_slice(&0u32.to_le_bytes()); // string
+            message.extend_from_slice(&LAYERSHELLIFY_STRING);
+
+            // Set anchors
+            message.extend_from_slice(&message_header(new_id, 1, 12));
+            message.extend_from_slice(&4u32.to_le_bytes());
+
+            // Set size
+            message.extend_from_slice(&message_header(new_id, 0, 16));
+            message.extend_from_slice(&128u32.to_le_bytes());
+            message.extend_from_slice(&128u32.to_le_bytes());
+
+            // Set margin
+            message.extend_from_slice(&message_header(new_id, 3, 24));
+            message.extend_from_slice(&8u32.to_le_bytes());
+            message.extend_from_slice(&8u32.to_le_bytes());
+            message.extend_from_slice(&8u32.to_le_bytes());
+            message.extend_from_slice(&8u32.to_le_bytes());
+
+            // Set keyboard interactivity
+            message.extend_from_slice(&message_header(new_id, 4, 12));
+            message.extend_from_slice(&2u32.to_le_bytes());
+
+            // TODO: Destroy layer shell and bind xdg_wm_base?
+
+            // Update state
+            debug!("Sending layer surface creation messages.");
+            state.layer_surface_id = Some(new_id);
+
+            MessageOperation::Replace(message)
+        } else {
+            MessageOperation::Keep
         }
     })
 }
 
 pub fn scan_events(bytes: &[u8], state: &mut State) -> Vec<u8> {
     scan_messages(bytes, state, |bytes, state, obj_id, opcode| {
-        match state.phase {
-            ProxyPhase::Binding {
-                registry_id,
-                advertised_layer_shell_name: _,
-                layer_shell_id,
-            } => {
-                // wl_registry::global
-                if let Some(id) = registry_id
-                    && obj_id == id
-                    && opcode == 0
+        // wl_registry::global
+        if let Some(id) = state.registry_id
+            && obj_id == id
+            && opcode == 0
+        {
+            let str_len: u32 = *from_bytes(&bytes[12..16]);
+            if str_len == LAYER_SHELL_STRING_LEN {
+                if LAYER_SHELL_BIND_TEMPLATE[4..(4 + LAYER_SHELL_STRING_LEN as usize)]
+                    == bytes[16..(16 + LAYER_SHELL_STRING_LEN as usize)]
                 {
-                    let str_len: u32 = *from_bytes(&bytes[12..16]);
-                    if str_len == LAYER_SHELL_STRING_LEN {
-                        if LAYER_SHELL_BIND_TEMPLATE[4..(4 + LAYER_SHELL_STRING_LEN as usize)]
-                            == bytes[16..(16 + LAYER_SHELL_STRING_LEN as usize)]
-                        {
-                            // This is the layer shell advertisement.
-                            let name = *from_bytes(&bytes[8..12]);
-                            debug!("Found zwlr_layer_shell_v1 advertised, will bind later.");
-                            state.phase = ProxyPhase::Binding {
-                                registry_id,
-                                layer_shell_id,
-                                advertised_layer_shell_name: Some(name),
-                            };
-                        }
+                    // This is the layer shell advertisement.
+                    let name = *from_bytes(&bytes[8..12]);
+                    debug!("Found zwlr_layer_shell_v1 advertised.");
+                    state.advertised_layer_shell_name = Some(name);
+                }
+            }
+        } else if let Some(id) = state.layer_surface_id
+            && obj_id == id
+        {
+            return match opcode {
+                // configure
+                0 => {
+                    let mut new_msgs = Vec::new();
+                    // Convert to xdg_surface::configure
+                    new_msgs.extend_from_slice(&bytes[0..12]);
+                    new_msgs[6] = 12;
+
+                    // Add an extra xdg_toplevel::configure
+                    if let Some(toplevel_id) = state.xdg_toplevel_id {
+                        new_msgs.extend_from_slice(&toplevel_id.to_le_bytes());
+                        new_msgs.extend_from_slice(&0u16.to_le_bytes());
+                        new_msgs.extend_from_slice(&20u16.to_le_bytes());
+                        new_msgs.extend_from_slice(&bytes[12..16]);
+                        new_msgs.extend_from_slice(&bytes[16..20]);
+                        new_msgs.extend_from_slice(&0u32.to_le_bytes());
+                    }
+
+                    MessageOperation::Replace(new_msgs)
+                }
+                1 => {
+                    if let Some(id) = state.xdg_toplevel_id {
+                        let mut new_msg: Vec<u8> = id.to_le_bytes().to_vec();
+                        new_msg.extend_from_slice(&bytes[4..8]);
+                        MessageOperation::Replace(new_msg)
+                    } else {
+                        MessageOperation::Drop
                     }
                 }
-                MessageOperation::Keep
-            }
-            ProxyPhase::Listening {
-                layer_shell_id,
-                layer_surface_id,
-            } => MessageOperation::Keep,
+                _ => MessageOperation::Drop, // Protocol error
+            };
         }
+        MessageOperation::Keep
     })
 }
 
@@ -260,8 +295,11 @@ pub fn scan_messages(
         match callback(bytes, state, obj_id, opcode) {
             MessageOperation::Drop => {
                 debug!(
-                    "[DROPPED MESSAGE] Object: {}, Opcode: {}, Size: {}",
-                    obj_id, opcode, size
+                    "[DROPPED MESSAGE] Object: {}, Opcode: {}, Size: {}\nFull Message: {:?}",
+                    obj_id,
+                    opcode,
+                    size,
+                    &bytes[0..usize_size]
                 );
             }
             MessageOperation::Keep => {

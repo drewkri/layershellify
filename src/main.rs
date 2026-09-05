@@ -28,31 +28,20 @@ use crate::{
 mod decode;
 mod util;
 
-/// State machine enum contained inside State. Used to track what
-/// types of messages we're looking for and what needs to be done next.
-enum ProxyPhase {
-    /// Waiting for the client to bind xdg_wm_base, and for us to bind to zwlr_layer_shell_v1.
-    /// Will listen for the client's request(s) to get the registry and find the name of
-    /// the layer shell global, then intercept the client's attempt to bind xdg_wm_base and
-    /// instead bind zwlr_layer_shell_v1.
-    Binding {
-        registry_id: Option<u32>,
-        advertised_layer_shell_name: Option<u32>,
-        layer_shell_id: Option<u32>,
-    },
-    /// Layer shell has been bound, now the proxy needs to handle any requests/events
-    /// involving xdg_wm_base/layer shell
-    Listening {
-        layer_shell_id: u32,
-        layer_surface_id: Option<u32>,
-    },
-}
-
 /// Shared state of the proxy
 struct State {
     compositor_socket: UnixStream,
     app_socket: UnixStream,
-    phase: ProxyPhase,
+
+    // Important ids
+    registry_id: Option<u32>,
+    advertised_layer_shell_name: Option<u32>,
+    layer_shell_id: Option<u32>,
+    layer_surface_id: Option<u32>,
+    xdg_toplevel_id: Option<u32>,
+    xdg_decoration_id: Option<u32>,
+    client_blacklist_ids: Vec<u32>,
+    // Settings (TODO)
 }
 
 fn main() {
@@ -110,11 +99,13 @@ fn main() {
     let mut state = State {
         compositor_socket: client_socket,
         app_socket: embedded_client,
-        phase: ProxyPhase::Binding {
-            registry_id: None,
-            advertised_layer_shell_name: None,
-            layer_shell_id: None,
-        },
+        client_blacklist_ids: Vec::new(),
+        registry_id: None,
+        advertised_layer_shell_name: None,
+        layer_shell_id: None,
+        xdg_toplevel_id: None,
+        layer_surface_id: None,
+        xdg_decoration_id: None,
     };
     let c_fd = state.compositor_socket.as_raw_fd();
     let a_fd = state.app_socket.as_raw_fd();
