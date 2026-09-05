@@ -114,7 +114,17 @@ pub fn scan_requests(bytes: &[u8], state: &mut State) -> Vec<u8> {
                     MessageOperation::Replace(create_useless_object(new_id, state))
                 }
                 // get_popup
-                2 => {}
+                2 => MessageOperation::Drop, // I really hope the first xdg_surface the app creates isn't a popup
+                // set_window_geometry
+                3 => MessageOperation::Drop,
+                // ack_configure
+                4 => {
+                    // Same exact request we just need to change it to opcode 6
+                    let mut msg: Vec<u8> = bytes[0..12].iter().cloned().collect();
+                    msg[4] = 6;
+
+                    MessageOperation::Replace(msg)
+                }
                 _ => MessageOperation::Drop, // Protocol error
             }
         } else if let Some(id) = state.xdg_decoration_id
