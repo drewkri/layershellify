@@ -1,4 +1,4 @@
-use std::{fmt::Display, u32};
+use std::u32;
 
 use bytemuck::from_bytes;
 use log::{debug, warn};
@@ -12,24 +12,6 @@ use crate::{
     },
 };
 
-/// Struct representing a message in Wayland and containing all its information.
-pub struct WaylandMessage {
-    pub size: u16,
-    pub opcode: u16,
-    pub obj_id: u32,
-    pub arguments_data: Vec<u8>,
-}
-
-impl Display for WaylandMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Size: {}, Opcode: {}, Object ID {}\nRaw Args Data: {:?}",
-            self.size, self.opcode, self.obj_id, self.arguments_data
-        )
-    }
-}
-
 /// Returned by the callback in `scan_messages` to determine what to do with the message.
 pub enum MessageOperation {
     Drop,             // Drop the message; do not copy it over
@@ -41,6 +23,47 @@ pub fn scan_requests(bytes: &[u8], state: &mut State) -> Vec<u8> {
     scan_messages(bytes, state, |bytes, state, obj_id, opcode| {
         if state.client_blacklist_ids.contains(&obj_id) {
             MessageOperation::Drop
+        } else if state.xdg_surfaces.contains(&obj_id) {
+            match opcode {
+                // destroy
+                0 => {
+                    // safe unwrap as we just asserted the vector contains this id
+                    let idx = state
+                        .xdg_surfaces
+                        .iter()
+                        .position(|item| *item == obj_id)
+                        .unwrap();
+                    state.xdg_surfaces.remove(idx);
+                    MessageOperation::Keep
+                }
+                // get_popup
+                2 => {
+                    let parent_id: u32 = *from_bytes(&bytes[12..16]);
+                    if parent_id == state.layer_surface_id.unwrap() {
+                        let mut msg: Vec<u8> = bytes[0..20].iter().cloned().collect();
+                        // Set the parent argument to null
+                        msg[12] = 0;
+                        msg[13] = 0;
+                        msg[14] = 0;
+                        msg[15] = 0;
+
+                        // Then add a second message which sets parent to the layer surface
+                        // Layer shell must exist by now since this at least the second xdg_surface the client created.
+                        msg.extend_from_slice(&message_header(
+                            state.layer_surface_id.unwrap(),
+                            5, // get_popup
+                            12,
+                        ));
+                        // add popup id as an argument
+                        msg.extend_from_slice(&bytes[8..12]);
+
+                        MessageOperation::Replace(msg)
+                    } else {
+                        MessageOperation::Keep
+                    }
+                }
+                _ => MessageOperation::Keep,
+            }
         }
         // wl_registry::bind
         else if let Some(id) = state.registry_id
@@ -57,6 +80,8 @@ pub fn scan_requests(bytes: &[u8], state: &mut State) -> Vec<u8> {
                 && state.layer_shell_id.is_none()
                 && bytes[16..28] == XDG_WM_BASE_STRING
             {
+                // Will be needed later
+                state.advertised_xdg_wm_base_name = Some(*from_bytes(&bytes[8..12]));
                 // Get the new id
                 // The next 4 bytes are version, then id
                 // If the client is binding to globals, we should've already sent our layer shell bind request
@@ -114,7 +139,7 @@ pub fn scan_requests(bytes: &[u8], state: &mut State) -> Vec<u8> {
                     MessageOperation::Replace(create_useless_object(new_id, state))
                 }
                 // get_popup
-                2 => MessageOperation::Drop, // I really hope the first xdg_surface the app creates isn't a popup
+                2 => MessageOperation::Drop, // The first xdg_surface the app creates should never be a popup
                 // set_window_geometry
                 3 => MessageOperation::Drop,
                 // ack_configure
@@ -140,58 +165,90 @@ pub fn scan_requests(bytes: &[u8], state: &mut State) -> Vec<u8> {
                 // get_toplevel_decoration
                 1 => {
                     let new_id = *from_bytes(&bytes[8..12]);
-                    // state.xdg_toplevel_decoration_id = Some(new_id);
-                    debug!("Blacklisting id {}", new_id);
-                    state.client_blacklist_ids.push(new_id);
+                    state.xdg_toplevel_decoration_id = Some(new_id);
                     MessageOperation::Replace(create_useless_object(new_id, state))
                 }
                 _ => MessageOperation::Drop, // Protocol error
             }
+        } else if let Some(id) = state.xdg_toplevel_decoration_id
+            && obj_id == id
+        {
+            match opcode {
+                // destroy
+                0 => {
+                    let mut msg: Vec<u8> = bytes[0..8].iter().cloned().collect();
+                    msg[4] = 1;
+                    MessageOperation::Replace(msg)
+                }
+                _ => MessageOperation::Drop, // no others matter
+            }
         } else if let Some(layer_shell_id) = state.layer_shell_id
             && obj_id == layer_shell_id
             && opcode == 2
-            && state.layer_surface_id.is_none()
-        // TODO: what to do with multiple windows?
         {
-            let new_id: u32 = *from_bytes(&bytes[8..12]);
-            let surface_id: u32 = *from_bytes(&bytes[12..16]);
+            if state.layer_surface_id.is_none() {
+                let new_id: u32 = *from_bytes(&bytes[8..12]);
+                let surface_id: u32 = *from_bytes(&bytes[12..16]);
 
-            // Create layer shell
-            let mut message = message_header(layer_shell_id, 0, 68);
-            message.extend_from_slice(&new_id.to_le_bytes()); // new id
-            message.extend_from_slice(&surface_id.to_le_bytes()); // wl_surface
-            message.extend_from_slice(&0u32.to_le_bytes()); // output (null)
-            message.extend_from_slice(&3u32.to_le_bytes()); // layer (overlay)
-            // message.extend_from_slice(&0u32.to_le_bytes()); // string
-            message.extend_from_slice(&LAYERSHELLIFY_STRING);
+                // Create layer shell
+                let mut message = message_header(layer_shell_id, 0, 68);
+                message.extend_from_slice(&new_id.to_le_bytes()); // new id
+                message.extend_from_slice(&surface_id.to_le_bytes()); // wl_surface
+                message.extend_from_slice(&0u32.to_le_bytes()); // output (null)
+                message.extend_from_slice(&3u32.to_le_bytes()); // layer (overlay)
+                // message.extend_from_slice(&0u32.to_le_bytes()); // string
+                message.extend_from_slice(&LAYERSHELLIFY_STRING);
 
-            // Set anchors
-            message.extend_from_slice(&message_header(new_id, 1, 12));
-            message.extend_from_slice(&4u32.to_le_bytes());
+                // Set anchors
+                message.extend_from_slice(&message_header(new_id, 1, 12));
+                message.extend_from_slice(&9u32.to_le_bytes());
 
-            // Set size
-            message.extend_from_slice(&message_header(new_id, 0, 16));
-            message.extend_from_slice(&128u32.to_le_bytes());
-            message.extend_from_slice(&128u32.to_le_bytes());
+                // Set size
+                message.extend_from_slice(&message_header(new_id, 0, 16));
+                message.extend_from_slice(&400u32.to_le_bytes());
+                message.extend_from_slice(&500u32.to_le_bytes());
 
-            // Set margin
-            message.extend_from_slice(&message_header(new_id, 3, 24));
-            message.extend_from_slice(&8u32.to_le_bytes());
-            message.extend_from_slice(&8u32.to_le_bytes());
-            message.extend_from_slice(&8u32.to_le_bytes());
-            message.extend_from_slice(&8u32.to_le_bytes());
+                // Set margin
+                message.extend_from_slice(&message_header(new_id, 3, 24));
+                message.extend_from_slice(&8u32.to_le_bytes());
+                message.extend_from_slice(&8u32.to_le_bytes());
+                message.extend_from_slice(&8u32.to_le_bytes());
+                message.extend_from_slice(&8u32.to_le_bytes());
 
-            // Set keyboard interactivity
-            message.extend_from_slice(&message_header(new_id, 4, 12));
-            message.extend_from_slice(&2u32.to_le_bytes());
+                // Set keyboard interactivity
+                message.extend_from_slice(&message_header(new_id, 4, 12));
+                message.extend_from_slice(&2u32.to_le_bytes());
 
-            // TODO: Destroy layer shell and bind xdg_wm_base?
+                // Destroy layer shell and bind xdg_wm_base
+                message.extend_from_slice(&message_header(layer_shell_id, 1, 8));
+                // there must be a registry id by this point, otherwise how did we bind layer shell
+                // similarly there must be an advertised xdg_wm_base name
+                message.extend_from_slice(&message_header(
+                    state.registry_id.unwrap(),
+                    0,
+                    16 + XDG_WM_BASE_STRING.len() as u16 + 8,
+                ));
+                message
+                    .extend_from_slice(&state.advertised_xdg_wm_base_name.unwrap().to_le_bytes());
+                message.extend_from_slice(&(XDG_WM_BASE_STRING.len() as u32).to_le_bytes());
+                message.extend_from_slice(&XDG_WM_BASE_STRING);
+                message.extend_from_slice(&7u32.to_le_bytes());
+                message.extend_from_slice(&layer_shell_id.to_le_bytes());
 
-            // Update state
-            debug!("Sending layer surface creation messages.");
-            state.layer_surface_id = Some(new_id);
+                // Update state
+                debug!("Sending layer surface creation messages.");
+                state.layer_surface_id = Some(new_id);
 
-            MessageOperation::Replace(message)
+                MessageOperation::Replace(message)
+            } else {
+                // We need to check when surfaces are created so that we can keep track of
+                // the app creating popups and appropriately alter those popups to conform to
+                // layer surfaces.
+                let new_id: u32 = *from_bytes(&bytes[8..12]);
+                state.xdg_surfaces.push(new_id);
+                debug!("Registering new xdg_surface with ID {}", new_id);
+                MessageOperation::Keep
+            }
         } else {
             MessageOperation::Keep
         }
@@ -216,26 +273,39 @@ pub fn scan_events(bytes: &[u8], state: &mut State) -> Vec<u8> {
                     state.advertised_layer_shell_name = Some(name);
                 }
             }
+            MessageOperation::Keep
         } else if let Some(id) = state.layer_surface_id
             && obj_id == id
         {
-            return match opcode {
+            match opcode {
                 // configure
                 0 => {
                     let mut new_msgs = Vec::new();
-                    // Convert to xdg_surface::configure
-                    new_msgs.extend_from_slice(&bytes[0..12]);
-                    new_msgs[6] = 12;
 
-                    // Add an extra xdg_toplevel::configure
+                    // First run toplevel configure events, if we can
+                    debug!("Sending xdg configure events.");
                     if let Some(toplevel_id) = state.xdg_toplevel_id {
-                        new_msgs.extend_from_slice(&toplevel_id.to_le_bytes());
-                        new_msgs.extend_from_slice(&0u16.to_le_bytes());
-                        new_msgs.extend_from_slice(&20u16.to_le_bytes());
+                        // Configure bounds first
+                        new_msgs.extend_from_slice(&message_header(toplevel_id, 2, 16));
                         new_msgs.extend_from_slice(&bytes[12..16]);
                         new_msgs.extend_from_slice(&bytes[16..20]);
-                        new_msgs.extend_from_slice(&0u32.to_le_bytes());
+
+                        new_msgs.extend_from_slice(&message_header(toplevel_id, 0, 40));
+                        new_msgs.extend_from_slice(&bytes[12..16]);
+                        new_msgs.extend_from_slice(&bytes[16..20]);
+                        new_msgs.extend_from_slice(&5u32.to_le_bytes());
+                        // Informs the window it is tiled; I picked a random side since I don't care for now.
+                        new_msgs.extend_from_slice(&5u32.to_le_bytes());
+                        // Constrained on all 4 sides; do not resize
+                        new_msgs.extend_from_slice(&10u32.to_le_bytes());
+                        new_msgs.extend_from_slice(&11u32.to_le_bytes());
+                        new_msgs.extend_from_slice(&12u32.to_le_bytes());
+                        new_msgs.extend_from_slice(&13u32.to_le_bytes());
                     }
+
+                    // Then add an xdg_surface::configure event
+                    new_msgs.extend_from_slice(&bytes[0..12]);
+                    new_msgs[16 + 40 + 6] = 12;
 
                     MessageOperation::Replace(new_msgs)
                 }
@@ -249,9 +319,22 @@ pub fn scan_events(bytes: &[u8], state: &mut State) -> Vec<u8> {
                     }
                 }
                 _ => MessageOperation::Drop, // Protocol error
-            };
+            }
+        // Send an extra configure event informing the client we don't want client side decorations,
+        // if needed
+        } else if state.needs_no_csd
+            && let Some(id) = state.xdg_toplevel_decoration_id
+        {
+            debug!("Sending configure request for server-side decorations.");
+            let size: u16 = *from_bytes(&bytes[6..8]);
+            let mut msg: Vec<u8> = bytes[0..size as usize].iter().cloned().collect();
+            msg.append(&mut message_header(id, 0, 12));
+            msg.extend_from_slice(&2u32.to_le_bytes());
+            state.needs_no_csd = false;
+            MessageOperation::Replace(msg)
+        } else {
+            MessageOperation::Keep
         }
-        MessageOperation::Keep
     })
 }
 

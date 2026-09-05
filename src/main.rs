@@ -36,11 +36,17 @@ struct State {
     // Important ids
     registry_id: Option<u32>,
     advertised_layer_shell_name: Option<u32>,
+    advertised_xdg_wm_base_name: Option<u32>,
+    /// This is the ID we initially bind layer shell to, later it will become
+    /// xdg_wm_base again.
     layer_shell_id: Option<u32>,
     layer_surface_id: Option<u32>,
     xdg_toplevel_id: Option<u32>,
     xdg_decoration_id: Option<u32>,
+    xdg_toplevel_decoration_id: Option<u32>,
     client_blacklist_ids: Vec<u32>,
+    needs_no_csd: bool,
+    xdg_surfaces: Vec<u32>,
     // Settings (TODO)
 }
 
@@ -102,10 +108,14 @@ fn main() {
         client_blacklist_ids: Vec::new(),
         registry_id: None,
         advertised_layer_shell_name: None,
+        advertised_xdg_wm_base_name: None,
         layer_shell_id: None,
         xdg_toplevel_id: None,
         layer_surface_id: None,
         xdg_decoration_id: None,
+        xdg_toplevel_decoration_id: None,
+        needs_no_csd: true,
+        xdg_surfaces: Vec::new(),
     };
     let c_fd = state.compositor_socket.as_raw_fd();
     let a_fd = state.app_socket.as_raw_fd();
@@ -113,10 +123,11 @@ fn main() {
     let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
     // should be large enough to hold any message easily
     let mut client_read_msg_buffer = [0; 2048];
-    // Usually only ever 1 FD but just to be safe I've allocated space for 4.
-    let mut client_ancillary_buffer = cmsg_space!([RawFd; 4]);
+    // Usually only ever 1 FD but just to be safe I've allocated space for 8.
+    // It was 4 but I occasionally saw seemingly random ENOBUFS errors so I upped it to 8.
+    let mut client_ancillary_buffer = cmsg_space!([RawFd; 8]);
     let mut server_read_msg_buffer = [0; 2048];
-    let mut server_ancillary_buffer = cmsg_space!([RawFd; 4]);
+    let mut server_ancillary_buffer = cmsg_space!([RawFd; 8]);
     let handle = event_loop.handle();
 
     // Handle events coming from the app
@@ -194,7 +205,7 @@ fn main() {
                         let msgs = to_borrowd_cmsgs(&owned_msgs);
                         sendmsg::<()>(
                             data.app_socket.as_raw_fd(),
-                            &[IoSlice::new(&bytes[0..recv_msg.bytes])],
+                            &[IoSlice::new(&output_bytes)],
                             &msgs,
                             recv_msg.flags,
                             None,
