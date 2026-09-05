@@ -195,25 +195,38 @@ pub fn scan_requests(bytes: &[u8], state: &mut State) -> Vec<u8> {
                 message.extend_from_slice(&new_id.to_le_bytes()); // new id
                 message.extend_from_slice(&surface_id.to_le_bytes()); // wl_surface
                 message.extend_from_slice(&0u32.to_le_bytes()); // output (null)
-                message.extend_from_slice(&3u32.to_le_bytes()); // layer (overlay)
+                message.extend_from_slice(&state.cli.layer.to_le_bytes()); // layer
                 // message.extend_from_slice(&0u32.to_le_bytes()); // string
                 message.extend_from_slice(&LAYERSHELLIFY_STRING);
 
                 // Set anchors
                 message.extend_from_slice(&message_header(new_id, 1, 12));
-                message.extend_from_slice(&9u32.to_le_bytes());
+                let mut anchors = 0u32;
+                if state.cli.anchor_top {
+                    anchors |= 1;
+                }
+                if state.cli.anchor_bottom {
+                    anchors |= 2;
+                }
+                if state.cli.anchor_left {
+                    anchors |= 4;
+                }
+                if state.cli.anchor_right {
+                    anchors |= 8;
+                }
+                message.extend_from_slice(&anchors.to_le_bytes());
 
                 // Set size
                 message.extend_from_slice(&message_header(new_id, 0, 16));
-                message.extend_from_slice(&400u32.to_le_bytes());
-                message.extend_from_slice(&500u32.to_le_bytes());
+                message.extend_from_slice(&state.cli.width.to_le_bytes());
+                message.extend_from_slice(&state.cli.height.to_le_bytes());
 
                 // Set margin
                 message.extend_from_slice(&message_header(new_id, 3, 24));
-                message.extend_from_slice(&8u32.to_le_bytes());
-                message.extend_from_slice(&8u32.to_le_bytes());
-                message.extend_from_slice(&8u32.to_le_bytes());
-                message.extend_from_slice(&8u32.to_le_bytes());
+                message.extend_from_slice(&state.cli.margins.to_le_bytes());
+                message.extend_from_slice(&state.cli.margins.to_le_bytes());
+                message.extend_from_slice(&state.cli.margins.to_le_bytes());
+                message.extend_from_slice(&state.cli.margins.to_le_bytes());
 
                 // Set keyboard interactivity
                 message.extend_from_slice(&message_header(new_id, 4, 12));

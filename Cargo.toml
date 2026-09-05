@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 bytemuck = "1.25.2"
 calloop = "0.14.4"
+clap = { version = "4.6.6", features = ["derive"] }
 env_logger = "0.11.11"
 log = "0.4.34"
 log4rs = "1.4.0"

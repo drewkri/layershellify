@@ -13,6 +13,7 @@ use calloop::{
     EventLoop, Interest,
     generic::{FdWrapper, Generic},
 };
+use clap::Parser;
 use log::{debug, warn};
 use nix::{
     cmsg_space,
@@ -27,6 +28,43 @@ use crate::{
 
 mod decode;
 mod util;
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+pub struct Cli {
+    /// Anchor to the left side. Can be combined with other anchors. At least one anchor must be set.
+    #[arg(short = 'L', long, default_value_t = false)]
+    anchor_left: bool,
+    /// Anchor to the right side. Can be combined with other anchors. At least one anchor must be set.
+    #[arg(short = 'R', long, default_value_t = false)]
+    anchor_right: bool,
+    /// Anchor to the top. Can be combined with other anchors. At least one anchor must be set.
+    #[arg(short = 'T', long, default_value_t = false)]
+    anchor_top: bool,
+    /// Anchor to the bottom. Can be combined with other anchors. At least one anchor must be set.
+    #[arg(short = 'B', long, default_value_t = false)]
+    anchor_bottom: bool,
+
+    /// Width of the new layer shell window
+    #[arg(short = 'W', long, default_value_t = 400)]
+    width: u32,
+    /// Height of the new layer shell window
+    #[arg(short = 'H', long, default_value_t = 400)]
+    height: u32,
+    /// Allow applications to have client-side decorations. By default they will be forced off.
+    #[arg(short, long, default_value_t = false)]
+    allow_csd: bool,
+    /// Margin to place on all sides of the app
+    #[arg(short, long, default_value_t = 0)]
+    margins: u32,
+    /// Layer shell layer to place the app on. 0 = background, 1 = bottom, 2 = top, 3 = overlay.
+    #[arg(short, long, default_value_t = 3)]
+    layer: u32,
+
+    /// Command to execute to start the application
+    #[arg(last = true)]
+    execute_command: Vec<String>,
+}
 
 /// Shared state of the proxy
 struct State {
@@ -47,11 +85,14 @@ struct State {
     client_blacklist_ids: Vec<u32>,
     needs_no_csd: bool,
     xdg_surfaces: Vec<u32>,
-    // Settings (TODO)
+    // Settings
+    cli: Cli,
 }
 
 fn main() {
     env_logger::init();
+
+    let cli = Cli::parse();
 
     // let logfile = log4rs::append::file::FileAppender::builder()
     //     .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
@@ -114,8 +155,9 @@ fn main() {
         layer_surface_id: None,
         xdg_decoration_id: None,
         xdg_toplevel_decoration_id: None,
-        needs_no_csd: true,
+        needs_no_csd: !cli.allow_csd,
         xdg_surfaces: Vec::new(),
+        cli,
     };
     let c_fd = state.compositor_socket.as_raw_fd();
     let a_fd = state.app_socket.as_raw_fd();
