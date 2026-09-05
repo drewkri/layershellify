@@ -8,6 +8,11 @@ although running in Xwayland rootful mode will likely work.
 Run `cargo build --release`.
 Should only compile on Linux since this relies on Linux system calls.
 
+## Usage
+
+Run `layershellify --help` to see options.
+At minimum, you need to set at least one anchor flag and then provide a command to run.
+
 ## How does it work?
 
 The app creates a proxy wayland display file descriptor which forwards all messages to your main compositor.

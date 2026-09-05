@@ -6,6 +6,7 @@ use std::{
         unix::net::{UnixListener, UnixStream},
     },
     path::Path,
+    process::{Child, Command, exit},
     time::Duration,
 };
 
@@ -87,6 +88,8 @@ struct State {
     xdg_surfaces: Vec<u32>,
     // Settings
     cli: Cli,
+
+    child_process_handle: Child,
 }
 
 fn main() {
@@ -129,14 +132,42 @@ fn main() {
         UnixStream::connect(client_socket_name).expect("Cannot connect to wayland compositor.");
 
     // Unlink the old socket file if it exists - fixes annoying err 98
-    let server_socket_path = format!("{}/wayland-0", runtime_dir);
-    if Path::new(&server_socket_path).exists() {
-        let _ = fs::remove_file(&server_socket_path);
-    }
+    let mut wayland_socket_idx = 0;
+    let server_socket = loop {
+        if wayland_socket_idx > 100 {
+            panic!("Unable to create wayland socket.")
+        }
+        let server_socket_path = format!("{}/wayland-{}", runtime_dir, wayland_socket_idx);
+        if Path::new(&server_socket_path).exists() {
+            let _ = fs::remove_file(&server_socket_path);
+        }
 
-    // TODO: new name other than wayland-0
-    let server_socket =
-        UnixListener::bind(server_socket_path).expect("Can't bind new wayland socket.");
+        let maybe_socket = UnixListener::bind(server_socket_path);
+        if let Ok(socket) = maybe_socket {
+            break socket;
+        } else {
+            wayland_socket_idx += 1;
+            continue;
+        }
+    };
+    // Safety: single-threaded program
+    unsafe {
+        env::set_var(
+            "WAYLAND_DISPLAY",
+            &format!("wayland-{}", wayland_socket_idx),
+        );
+    }
+    // Run the app specified
+    let mut cmd_iter = cli.execute_command.iter();
+    let mut cmd = Command::new(cmd_iter.next().expect("No command provided to start app."));
+    while let Some(arg) = cmd_iter.next() {
+        cmd.arg(arg);
+    }
+    debug!(
+        "Running command: {:?}",
+        cmd.get_args().collect::<Vec<&std::ffi::OsStr>>()
+    );
+    let handle = cmd.spawn().expect("Failed to start application.");
 
     // We will not connect to any other clients.
     let (embedded_client, _embedded_client_addr) = server_socket
@@ -157,6 +188,7 @@ fn main() {
         xdg_toplevel_decoration_id: None,
         needs_no_csd: !cli.allow_csd,
         xdg_surfaces: Vec::new(),
+        child_process_handle: handle,
         cli,
     };
     let c_fd = state.compositor_socket.as_raw_fd();
@@ -270,7 +302,16 @@ fn main() {
         )
         .unwrap();
 
-    let _ = event_loop.run(Duration::from_millis(500), &mut state, |_| {
-        // timeout callback - unneeded
+    let _ = event_loop.run(Duration::from_millis(500), &mut state, |state| {
+        // timeout callback - check if child is still alive
+        if let Ok(status) = state.child_process_handle.try_wait() {
+            if status.is_some() {
+                debug!("Exiting since child process ended.");
+                exit(0);
+            }
+        } else {
+            warn!("Error getting child process exit status, exiting.");
+            exit(0); // Error?
+        }
     });
 }
